@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+bubble_results/
+synthetic/
+bubble_config.json
