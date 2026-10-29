@@ -5,3 +5,6 @@ venv/
 bubble_results/
 synthetic/
 bubble_config.json
+*_ref.png
+sessions/
+.pytest_cache/

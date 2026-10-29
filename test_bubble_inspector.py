@@ -48,6 +48,8 @@ def base_image(rng):
     img *= np.where(np.abs(xn) <= 1, 0.95 - 0.22 * xn ** 6, 1.0)          # barrel shading
     for wx in (x0 - 22, x1):                                              # walls
         img[:, wx:wx + 22] *= 0.38
+    img[ROI[1] - 45:ROI[1] - 12, x0 - 22:x1 + 22] *= 0.45                 # tip shoulder
+    img[ROI[1] + ROI[3] + 10:ROI[1] + ROI[3] + 50, x0 - 22:x1 + 22] *= 0.3  # plunger seal
     img[:, 168:173] *= 1.15                                               # glare streak
     tick_dy = 0.2 * UL_PER_ML_MM / MM_PER_PX                              # 0.2 mL spacing
     y, k = ROI[1] + 25, 0
@@ -147,13 +149,13 @@ def scenes(rng):
     add_bubble(img, 400, 600, 1.2)
     out.append(("60 uL headspace + 1 bubble", finish(img, rng), [sphere_ul(1.2)], true_head, "FAIL", config()))
 
-    # same 30 uL scene, syringe lying sideways with the tip on the left
+    # same 30 uL scene with the camera rotated 90 degrees (tip at the left of the picture)
     _, f30, *_ = out[1]
     rot = cv2.rotate(f30, cv2.ROTATE_90_COUNTERCLOCKWISE)
     def rot_box(b):
         x, y, w, h = b
         return [y, FW - x - w, h, w]
-    out.append(("30 uL bubble, syringe horizontal", rot, [30.0], 0.0, "FAIL",
+    out.append(("30 uL bubble, camera rotated 90 deg", rot, [30.0], 0.0, "FAIL",
                 config(roi=rot_box(ROI), exclusions=[rot_box(e) for e in EXCL], air_end="left")))
     return out
 
