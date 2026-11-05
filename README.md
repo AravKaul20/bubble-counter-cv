@@ -29,8 +29,9 @@ that breaks the imaging setup, and tells the operator what to fix.
 
 1. Put a white light *behind* the syringe (a tablet or monitor showing a white screen
    works) and turn off room lights in front of it.
-2. Stand the syringe upright, tip up, and fix the phone or camera close to it, so the
-   barrel fills most of the photo.
+2. Stand the syringe upright, tip up, and put the phone close to it, so the barrel
+   fills most of the photo. No special stand is needed: lean the phone against a stack
+   of books and mark its spot and the syringe's spot with tape.
 3. Take one photo, then run:
    ```bash
    python syringe_bubble_inspector.py setup --image calibration.jpg --syringe 10ml
@@ -38,17 +39,68 @@ that breaks the imaging setup, and tells the operator what to fix.
    Drag a box just inside the barrel walls (ENTER), then click two graduation marks far
    apart and type their spacing, e.g. `5 ml`.
 
-**Each syringe:** take a photo from the same spot and run
+**Each syringe:** take a photo from about the same spot and run
 
 ```bash
 python guided_inspection.py photo.jpg
 ```
 
 It prints PASS / MARGINAL / FAIL with the air volume and writes a report (path
-printed). If the photo is bad, for example lit from the front, moved, zoomed or blurry,
-it says INVALID and tells you what to fix. Optional: add a second photo with the
+printed). If the photo is bad, for example lit from the front, blurry, or the syringe
+is far from where it was at calibration, it says INVALID and tells you what to fix. Optional: add a second photo with the
 syringe turned 90° (`python guided_inspection.py front.jpg turned.jpg`) to catch
 bubbles hidden behind the printed scale.
+
+**Easiest: test from the phone.** On the computer run
+
+```bash
+python phone_server.py
+```
+
+and open the address it prints in the phone's browser. The page asks for each photo,
+sends it straight to the computer and shows PASS / MARGINAL / FAIL / RETAKE with the
+annotated photo a few seconds later. There's no file copying and no terminal while you
+test. Results are saved as in batch mode below (`sessions/batch_<time>_phone.csv`).
+The page also takes the calibration photo; then run setup on the computer once (the page
+shows the command). Notes:
+- The phone and computer must be on the same network. University Wi-Fi often blocks
+  devices from reaching each other; if the page doesn't load, turn on the phone's hotspot
+  and connect the computer to it.
+- On the first run, Windows asks whether Python may use the network: allow it on private
+  networks.
+- Anyone on the same network can open the page while it runs. Stop it with Ctrl+C.
+
+**Many syringes from photos already taken:** photograph every syringe in turn, then
+check them all with one command:
+
+1. For each syringe: put it on its tape mark, let it rest about 30 s, take a photo,
+   turn it 90° about its own axis, and take a second photo.
+2. Copy all the photos into one folder, straight off the phone (JPEG, not HEIC).
+3. Run:
+   ```bash
+   python batch_inspect.py photos/
+   ```
+
+You get one line per syringe and a CSV (`sessions/batch_<time>_<folder>.csv`):
+
+```
+  sample             result     largest    total  photos / reason
+  photos-001         PASS        3.2 uL   8.1 uL  IMG_1001.jpg + IMG_1002.jpg
+  photos-002         FAIL       31.0 uL  35.6 uL  largest pocket 31.0 uL (limit 25)
+  photos-003         RETAKE           -        -  Front photo: focus - Refocus on the barrel ...
+```
+
+At the end it lists the syringes to photograph again and what to fix. RETAKE means a
+photo was unusable, so no numbers are given for that syringe.
+
+The batch tool pairs photos by the time the phone stored in them. Photos taken within
+20 s of each other belong to one syringe. If you retake a photo, delete the bad one
+first; otherwise that syringe is flagged RETAKE ("3 photos") rather than guessed. Photos
+with no stored time (screenshots, edited copies) are paired in name order, which cannot
+spot a missing photo, so keep the phone's original files. If you prefer naming the samples yourself, put each
+syringe's photos in its own subfolder (`photos/S12/`, `photos/S13/`, ...) and the folder
+name becomes the sample ID. Options: `--views 1` (one photo per syringe), `--gap 40`
+(a slower turn), `--fill-ml`, `--operator`.
 
 The rest of this README is reference detail.
 
@@ -57,9 +109,12 @@ The rest of this README is reference detail.
 | File | Purpose |
 |---|---|
 | `guided_inspection.py` | **Start here.** Guided photo session for one syringe, with report |
+| `phone_server.py` | Mass testing from the phone's browser: take photos, see results on the phone |
+| `batch_inspect.py` | Mass testing: a whole folder of photos, one result row per syringe |
 | `syringe_bubble_inspector.py` | Detector, photo-quality checks, and tools: `setup` (calibration), `run` (batch images, live preview, video) |
 | `test_bubble_inspector.py` | Synthetic accuracy test with known bubble sizes |
 | `test_guided.py` | Tests for the quality checks and the guided session |
+| `test_batch.py` | Tests for batch mode (which photos belong to which syringe) and the phone server |
 | `requirements.txt` | Python dependencies |
 
 ## Install
@@ -86,11 +141,16 @@ that breaks one is reported INVALID with the reason.
 2. **Vertical, tip up.** Free air rises to the tip, where it is measured as headspace.
    The camera may be rotated (tell setup which side of the *picture* the tip is on with
    `--air-end`), but the syringe itself must stand tip up.
-3. **Fixed geometry.** Hold the syringe in a holder at a fixed distance from the camera,
-   so one calibration covers every test. Small shifts when the syringe is re-seated are
-   detected and followed automatically; a change of size (camera distance, zoom, lens)
-   or tilt is not, and makes the photo INVALID. Index marks on the holder make the
-   quarter turns repeatable.
+3. **Roughly the same geometry.** Keep the phone and syringe at about the place they
+   were at calibration (tape marks are enough). Every photo is compared with the
+   calibration photo: how far the syringe moved, how much bigger or smaller it looks
+   (phone closer or farther) and how much it is tilted are measured from the barrel walls
+   and ends, and the photo is resampled to undo them before measuring. The scale from
+   calibration then applies, so the air volume is unchanged. Limits: the barrel must be
+   wholly in the photo, at most 25% smaller (farther away means less detail; WARN from
+   10% smaller) or 33% bigger, shifted by at most half a barrel width sideways, and
+   tilted by at most 10° (WARN from 4°). Changing the lens, the zoom setting or the
+   syringe size needs a new calibration.
 4. **Close enough.** Fill the frame with the barrel along the photo's long side. One
    pixel of liquid level should be at most 5 µL (setup prints this figure): about
    0.025 mm per pixel for a 10 mL syringe, which a 12 MP phone camera reaches when the
@@ -227,8 +287,8 @@ section in `syringe_bubble_inspector.py`.
 | Check | What it measures | WARN | FAIL |
 |---|---|---|---|
 | geometry | Photo size vs. the calibration photo | lower resolution (upscaled) | different shape (other camera or orientation) |
-| alignment | Where the barrel is, from the walls (sideways) and the tip shoulder and plunger (along the barrel) | moved > 15% of barrel width (still followed) | moved > 30%, or barrel not found |
-| scale | Size and tilt vs. the calibration photo (wall spacing; wall shift between barrel halves) | > 2% size or > 1.5° | > 5% size or > 3° |
+| alignment | Where the barrel is, from the walls (sideways) and the tip shoulder and plunger (along the barrel); the photo is shifted back to match | | barrel not found within the search, or partly outside the photo |
+| scale | Size and tilt vs. the calibration photo (wall spacing; wall direction), corrected by resampling | > 10% smaller, or > 4° | > 20% smaller, > 10°, or detail worse than 10 µL per pixel |
 | resolution | µL per pixel of liquid level; pixels across the smallest reportable bubble | > 5 µL/px, or < 3 px | > 10 µL/px |
 | exposure | Median grey level in the barrel; fraction blown out | < 100, or > 5% clipped | < 60, or > 25% clipped |
 | background | Largest local offset from the background model, ignoring bubbles and headspace | > 3% | > 6% |
@@ -299,6 +359,7 @@ default 20%, and state results as value ± uncertainty.
 python test_bubble_inspector.py          # detector accuracy on synthetic photos
 python test_bubble_inspector.py --save   # also write the images to synthetic/
 python test_guided.py                    # quality checks and guided sessions (or: pytest)
+python test_batch.py                     # batch mode: grouping photos into syringes
 ```
 
 `test_bubble_inspector.py` renders backlit syringe images with known bubble sizes,
@@ -308,13 +369,19 @@ a clean syringe, single 30 µL (FAIL) and 22 µL (MARGINAL) bubbles, eight small
 (one across the ticks), two touching bubbles, a bubble cut off by the wall, 60 µL of
 headspace with a curved meniscus, and a camera rotated 90°.
 
-`test_guided.py` checks that good photos pass and that front-lit, blurred, badly
-exposed, moved, zoomed, tilted and wrong-camera photos are rejected; that bubbles
+`test_guided.py` checks that good photos pass; that front-lit, blurred, badly exposed
+and wrong-camera photos, and photos without the whole syringe, are rejected; that moved,
+zoomed and tilted photos are corrected and give the same reading, up to the limits; that bubbles
 behind the scale boxes, large bubbles, many bubbles and headspace near the limit are
 measured correctly; how views are combined; and complete sessions: reports, exit codes,
 duplicate photos, retakes and non-ASCII names.
 
-Run both after any change.
+`test_batch.py` checks that photos are grouped into syringes by their capture time,
+that a retaken photo flags the syringe instead of pairing the wrong photos, that name
+order is refused when the count does not add up, and the one-subfolder-per-syringe
+layout.
+
+Run all three after any change.
 
 ## Limitations
 

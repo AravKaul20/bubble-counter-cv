@@ -31,6 +31,10 @@ def status_of(a, name):
     return found[0] if found else None
 
 
+def status_value(a, name):
+    return [c.value for c in a.checks if c.name == name][0]
+
+
 def calibrated(ref):
     """Test config plus what setup stores from the calibration photo."""
     cfg = T.config()
@@ -112,39 +116,49 @@ def test_exposure_is_checked():
         assert status_of(a, "exposure") == FAIL and a.verdict == "INVALID"
 
 
-def test_small_shift_is_followed_and_measurement_unchanged():
+def test_shift_is_corrected_and_measurement_unchanged():
+    # A rough rig: the syringe is re-seated a little differently every time.
     rng = np.random.default_rng(5)
     ref = photo(rng)
     cfg = calibrated(ref)
     d30 = T.d_for_volume(30)
-    for shift in [(0, 0), (6, -4), (-20, 9)]:
+    for shift in [(0, 0), (6, -4), (-20, 9), (130, 0), (-60, 35)]:
         a = assess(photo(rng, [(400, 500, d30)], shift), cfg, ref)
-        assert status_of(a, "alignment") in (OK, WARN), shift
-        dx, dy = a.cfg.roi[0] - T.ROI[0], a.cfg.roi[1] - T.ROI[1]
-        assert abs(dx - shift[0]) <= 1.5 and abs(dy - shift[1]) <= 1.5, (shift, dx, dy)
+        assert status_of(a, "alignment") == OK, (shift, a.problems)
+        cx, cy = a.result.bubbles[0].center              # back where calibration has it
+        assert abs(cx - 400) <= 1.5 and abs(cy - 500) <= 1.5, (shift, cx, cy)
         assert abs(a.result.max_pocket_ul - 30) < 4.5 and a.verdict == "FAIL", (shift, a.result.max_pocket_ul)
 
 
-def test_large_shift_is_rejected():
+def test_syringe_not_in_the_photo_is_rejected():
     rng = np.random.default_rng(6)
     ref = photo(rng)
-    a = assess(photo(rng, [(400, 500, 1.0)], (130, 0)), calibrated(ref), ref)
-    assert status_of(a, "alignment") == FAIL and a.verdict == "INVALID"
+    cfg = calibrated(ref)
+    for f in (photo(rng, [(400, 500, 1.0)], (300, 0)),          # barrel half out of the photo
+              np.full_like(ref, 210)):                          # no syringe at all
+        a = assess(f, cfg, ref)
+        assert status_of(a, "alignment") == FAIL and a.verdict == "INVALID" and a.result is None
 
 
-def test_zoom_and_tilt_are_rejected_not_measured():
-    # Review finding: a 7% zoom turned a 20 uL bubble into a 25.8 uL FAIL with every check OK.
+def test_zoom_and_tilt_are_corrected():
+    # Review finding (old fixed-rig version): a 7% zoom turned a 20 uL bubble into a 25.8 uL
+    # FAIL with every check OK. Size and tilt are now measured and undone, so the reading
+    # must stay at 20 uL; beyond what can be corrected the photo is refused.
     rng = np.random.default_rng(12)
     ref = photo(rng)
     cfg = calibrated(ref)
     f = photo(rng, [(400, 500, T.d_for_volume(20))])
-    assert status_of(assess(f, cfg, ref), "scale") == OK
-    for zoom, tilt in [(1.07, 0), (0.93, 0), (1.0, 8.0)]:
+    base = assess(f, cfg, ref).result.max_pocket_ul
+    for zoom, tilt in [(1.07, 0), (0.93, 0), (1.0, 3.0), (1.0, -8.0), (1.05, 4.0), (0.88, -5.0)]:
         a = assess(warp(f, zoom, tilt), cfg, ref)
-        assert a.verdict == "INVALID", (zoom, tilt, a.verdict, [(c.name, c.value) for c in a.problems])
-    for zoom, tilt in [(1.03, 0), (1.0, 2.0)]:           # small changes: warned, still measured
+        assert a.verdict != "INVALID", (zoom, tilt, a.verdict, [(c.name, c.value) for c in a.problems])
+        assert abs(a.result.max_pocket_ul - base) < 0.05 * base, (zoom, tilt, a.result.max_pocket_ul, base)
+        size, deg = [float(v.split("%")[0]) if "%" in v else float(v.split()[0])
+                     for v in status_value(a, "scale").replace(" deg", "").split(", ")]
+        assert abs(size - (zoom - 1) * 100) <= 1 and abs(abs(deg) - abs(tilt)) <= 0.5, (zoom, tilt, size, deg)
+    for zoom, tilt in [(0.78, 0), (1.0, 12.0)]:          # much farther away, or tilted a lot
         a = assess(warp(f, zoom, tilt), cfg, ref)
-        assert status_of(a, "scale") == WARN and a.verdict != "INVALID", (zoom, tilt, a.verdict)
+        assert status_of(a, "scale") == FAIL and a.verdict == "INVALID", (zoom, tilt)
 
 
 def test_quarter_view_without_printed_scale_aligns():

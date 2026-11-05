@@ -52,15 +52,15 @@ from syringe_bubble_inspector import (FAIL, OK, SKIP, SPEC_MAX_POCKET_UL, STATUS
 VIEWS = [
     ("front", "Front", "graduations facing the camera"),
     ("quarter", "Quarter turn", "turn the syringe 90 degrees about its own axis, "
-                                "without lifting it out of the holder"),
+                                "keeping it on its spot"),
     ("half", "Half turn", "turn it another 90 degrees (graduations facing away)"),
     ("three-quarter", "Three-quarter turn", "turn it another 90 degrees"),
 ]
 
 CHECKLIST = [
     "White light BEHIND the syringe (e.g. a tablet showing a white screen), room lights off",
-    "Syringe upright, tip up, in the same spot as the calibration photo",
-    "Camera in the same place, same zoom; let the syringe rest {settle} s first (don't tap it)",
+    "Syringe upright, tip up, on its usual spot (about where it was for the calibration photo)",
+    "Phone on its usual spot, same lens and zoom; let the syringe rest {settle} s first (don't tap it)",
 ]
 
 # What the number covers. Shown in every report so nobody reads more into it.
@@ -312,20 +312,27 @@ class CameraSource:
             raise Abort(f"could not open camera {args.camera}")
 
     def capture(self, step, title, how):
-        n, checks, cfg = 0, [], self.cfg
+        n, checks, cfg, M = 0, [], self.cfg, None
         while True:
             ok, frame = self.cap.read()
             if not ok:
                 raise Abort("camera stopped delivering frames")
             if n % 10 == 0:          # the checks are slower than the camera; refresh a few times a second
-                f2, cfg, checks = align_to_reference(frame, self.cfg, self.ref)
-                if not any(c.status == FAIL and c.name in ("geometry", "roi") for c in checks):
+                f2, cfg, checks, M = align_to_reference(frame, self.cfg, self.ref)
+                if not any(c.status == FAIL and c.name in ("geometry", "roi", "alignment") for c in checks):
                     checks = checks + check_photo(f2, cfg)
             n += 1
             st = worst(c.status for c in checks)
             disp = frame.copy()
-            x, y, w, h = [int(v) for v in cfg.roi]
-            cv2.rectangle(disp, (x, y), (x + w, y + h), STATUS_COLOR[st], max(2, disp.shape[0] // 400))
+            # the barrel box where the syringe was found (camera pixels, before any rescale)
+            x, y, w, h = cfg.roi
+            box = np.array([[x, y, 1], [x + w, y, 1], [x + w, y + h, 1], [x, y + h, 1]], np.float64)
+            if M is not None:
+                box = box @ M.T
+            if cfg.image_size:
+                box[:, :2] *= [disp.shape[1] / cfg.image_size[0], disp.shape[0] / cfg.image_size[1]]
+            cv2.polylines(disp, [box[:, :2].astype(np.int32)], True, STATUS_COLOR[st],
+                          max(2, disp.shape[0] // 400))
             lines = [(f"Step {step}: {title} - {how}", (255, 255, 255))]
             lines += [(f"{c.status} {c.name}: {c.fix or c.message}", STATUS_COLOR[c.status])
                       for c in checks if c.status in (WARN, FAIL)][:4]
@@ -674,13 +681,21 @@ def parse_args(argv):
 
 
 def session(args):
+    rep, _ = run_session(args)
+    return 2 if rep is None else EXIT_CODE[rep["verdict"]]
+
+
+def run_session(args, history=None):
+    """One syringe, start to finish. Returns (report dict, session folder), or (None, None)
+    if there is no calibration. history ({sha256: session}) is the earlier-session photo
+    index; pass it to skip rescanning the sessions folder (batch_inspect.py keeps it)."""
     interactive = not args.photos
     views = [ViewRecord(k, label, how) for k, label, how in VIEWS[:args.views]]
 
     if not os.path.exists(args.config) and not (interactive and offer_setup(args)):
         print(f"No calibration. Run:  python syringe_bubble_inspector.py setup --image <photo> "
               f"--config {args.config}")
-        return 2
+        return None, None
     cfg = Config.load(args.config)
     ref = load_reference(cfg, args.config)
     if ref is None and not cfg.ref_image:
@@ -712,7 +727,8 @@ def session(args):
     out_dir, n = base, 2
     while os.path.exists(out_dir):            # never overwrite an earlier session
         out_dir, n = f"{base}_{n}", n + 1
-    history = earlier_hashes(args.out)
+    if history is None:
+        history = earlier_hashes(args.out)
     os.makedirs(out_dir)
 
     aborted = None
@@ -781,7 +797,7 @@ def session(args):
     for n in rep["notes"]:
         print(f"  Note: {n}")
     print(f"  Report: {os.path.join(out_dir, 'report.html')}")
-    return EXIT_CODE[rep["verdict"]]
+    return rep, out_dir
 
 
 def main(argv=None):

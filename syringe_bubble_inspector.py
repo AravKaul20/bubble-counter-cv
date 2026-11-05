@@ -13,8 +13,9 @@ bubble count, so it can serve as an objective bench test for the de-airing devic
 Imaging assumptions (the method is built around these):
   1. Backlit: a diffuse light panel BEHIND the syringe, camera in front. Bubbles then
      appear as dark rings on a bright field (light refracts away at the air surface).
-  2. Fixed geometry: syringe held in a jig at a fixed distance, so one calibration
-     covers every test.
+  2. Roughly fixed geometry: phone and syringe at about the place they were at
+     calibration. Shifts, size changes (phone closer or farther) and tilt are measured
+     against the calibration photo and corrected, so tape marks are enough.
   3. You tell the program which side of the image the air end (the tip) is on.
      Free air rises there and is measured as "headspace".
   4. Fixed exposure and focus (auto-exposure makes the threshold drift between frames).
@@ -477,10 +478,14 @@ QC_BACKGROUND = (0.03, 0.06)      # largest local offset from the background mod
 QC_BRIGHT_RATIO = (0.5, 1.0)      # area of bright features / area of dark features
 QC_SHARPNESS_REL = (0.8, 0.6)     # edge sharpness relative to the calibration photo
 QC_SHARPNESS_ABS = (0.06, 0.0)    # no calibration photo: WARN only (depends on resolution)
-QC_SHIFT = (0.15, 0.3)            # shift since calibration, as a fraction of barrel width
-QC_ALIGN_RESPONSE = 0.5           # wall/end profile correlation below this = shift not found
-QC_SCALE = (0.02, 0.05)           # size change since calibration (volume goes as size^3)
-QC_ROTATION_DEG = (1.5, 3.0)      # tilt since calibration
+QC_ALIGN_RESPONSE = 0.5           # wall/end profile correlation below this = barrel not found
+# Moves, size changes and tilt since calibration are measured and corrected (the photo is
+# resampled into the calibration's geometry), so a rough rig is enough. Limits:
+QC_SIZE_RANGE = (0.75, 1.33)      # size ratio the search covers (photo / calibration)
+QC_FARTHER = (0.9, 0.8)           # syringe looks smaller than this: less detail (WARN, FAIL)
+QC_ROTATION_DEG = (4.0, 10.0)     # tilt since calibration (corrected, but WARN / FAIL beyond)
+QC_SHIFT = 0.5                    # sideways search, as a fraction of the barrel width
+QC_SHIFT_ALONG = 0.12             # along-barrel search, as a fraction of the barrel length
 QC_THRESH_SPREAD = (0.1, 0.3)     # result change when the threshold is varied, as a
                                   # fraction of the limit (25 uL pocket / total limit)
 QC_COVERAGE = 0.25                # bubble mask covering more of the barrel than this
@@ -564,43 +569,115 @@ def _match(a, b, scales, shifts):
 
 def _search(a, b, scales, max_shift):
     """Coarse-to-fine version of _match over a scale range and +-max_shift pixels."""
-    _, s, t = _match(a, b, scales, np.arange(-max_shift, max_shift + 1, 2.0))
-    fine = np.arange(s - 0.01, s + 0.0101, 0.002) if len(scales) > 1 else [s]
-    return _match(a, b, fine, np.arange(t - 2, t + 2.01, 0.25))
+    step = max(2.0, max_shift / 120.0)
+    _, s, t = _match(a, b, scales, np.arange(-max_shift, max_shift + 0.01, step))
+    if len(scales) > 1:
+        ds = abs(scales[1] - scales[0])
+        _, s, t = _match(a, b, np.arange(s - ds, s + ds + 1e-9, ds / 5), np.arange(t - step, t + step + 0.01, 0.5))
+    return _match(a, b, np.arange(s - 0.004, s + 0.00401, 0.001) if len(scales) > 1 else [s],
+                  np.arange(t - 1, t + 1.01, 0.125))
 
 
-def register(gray, ref_gray, cfg):
-    """
-    Where the barrel is in this photo compared with the calibration photo: shift
-    (dx, dy) in camera pixels, size ratio, tilt in degrees, and a match score (0..1).
-    Sideways shift and size come from the two walls, the shift along the barrel from
-    its ends, and the tilt from how far the walls move between the two halves of the
-    barrel. Size matters a lot: bubble volume goes as size cubed.
-    """
-    sl = context_box(cfg, gray.shape)
+def reg_box(cfg, shape):
+    """The ROI plus the barrel walls and ends around it, with room for the syringe or the
+    phone to have moved: what alignment compares. (x0, y0, x1, y1) in camera pixels."""
+    x, y, w, h = cfg.roi
+    across, along = (w, h) if cfg.air_end in ("top", "bottom") else (h, w)
+    m_across = (QC_SHIFT + 0.15) * across
+    m_along = (QC_SHIFT_ALONG + 0.06) * along
+    mx, my = (m_across, m_along) if cfg.air_end in ("top", "bottom") else (m_along, m_across)
+    return (max(0, int(x - mx)), max(0, int(y - my)),
+            min(shape[1], int(x + w + mx)), min(shape[0], int(y + h + my)))
+
+
+def _work_to_frame(air_end, x0, y0, w, h):
+    """3x3 affine from working coordinates (air end up) of a w x h box at (x0, y0) to
+    camera pixels. Same mapping as View.to_frame."""
+    return np.array({"top": [[1, 0, x0], [0, 1, y0]],
+                     "bottom": [[-1, 0, w - 1 + x0], [0, -1, h - 1 + y0]],
+                     "left": [[0, 1, x0], [-1, 0, h - 1 + y0]],
+                     "right": [[0, -1, w - 1 + x0], [1, 0, y0]]}[air_end] + [[0, 0, 1]], np.float64)
+
+
+def _reg_patches(gray, ref_gray, cfg):
+    """The registration box of both photos in working orientation (air end up), plus the
+    3x3 matrix from working to camera pixels."""
+    x0, y0, x1, y1 = reg_box(cfg, gray.shape)
     rot = TO_WORK[cfg.air_end]
-    a, b = ref_gray[sl], gray[sl]
+    a, b = ref_gray[y0:y1, x0:x1], gray[y0:y1, x0:x1]
     if rot is not None:
         a, b = cv2.rotate(a, rot), cv2.rotate(b, rot)
+    return a, b, _work_to_frame(cfg.air_end, x0, y0, x1 - x0, y1 - y0)
+
+
+def _box_affine(F, shape, s, phi, tu, tv):
+    """Calibration -> photo camera-pixel matrix for a size ratio s, tilt phi (radians) and
+    shift (tu, tv) about the centre of a working-orientation box of this shape."""
+    h, w = shape
+    c = np.array([(w - 1) / 2.0, (h - 1) / 2.0])
+    R = s * np.array([[math.cos(phi), math.sin(phi)], [-math.sin(phi), math.cos(phi)]])
+    A = np.eye(3)
+    A[:2, :2], A[:2, 2] = R, c + [tu, tv] - R @ c
+    return F @ A @ np.linalg.inv(F)
+
+
+def _wall_orientation(p):
+    """Mean direction of the long, nearly-along-the-barrel edges (the walls) in a working-
+    orientation patch, in radians. Independent of size and position, unlike the profiles."""
+    p = cv2.GaussianBlur(p.astype(np.float32), (0, 0), 1.5)
+    gx, gy = cv2.Sobel(p, cv2.CV_32F, 1, 0), cv2.Sobel(p, cv2.CV_32F, 0, 1)
+    o = np.arctan(gy / (np.abs(gx) + 1e-6) * np.sign(gx + 1e-12))     # 0 = edge along the barrel
+    m = np.hypot(gx, gy)
+    sel = (np.abs(o) < math.radians(25)) & (m > np.percentile(m, 90))
+    return float(np.sum(o[sel] * m[sel] ** 2) / max(np.sum(m[sel] ** 2), 1e-9))
+
+
+def tilt_matrix(gray, ref_gray, cfg):
+    """Rotation that takes the calibration's wall direction to this photo's (about the
+    registration box centre). Applied first, so the size and shift searches see straight walls."""
+    a, b, F = _reg_patches(gray, ref_gray, cfg)
+    phi = -(_wall_orientation(b) - _wall_orientation(a))
+    return _box_affine(F, a.shape, 1.0, phi, 0.0, 0.0)
+
+
+def register(gray, ref_gray, cfg, scales=None, shift=None, shift_along=None):
+    """
+    Where the barrel is in this photo compared with the calibration photo, as a 3x3
+    matrix M taking calibration pixels to this photo's pixels, plus a match score (0..1).
+    Sideways shift and size come from the two walls (their spacing gives the size), the
+    shift along the barrel from its ends, and the tilt from how far the walls move between
+    the two halves of the barrel. Size matters a lot: bubble volume goes as size cubed.
+    """
+    a, b, F = _reg_patches(gray, ref_gray, cfg)
     h, w = a.shape
-    max_shift = int(0.25 * w)
-    r_u, s, tu = _search(_wall_profile(a, 0), _wall_profile(b, 0), np.arange(0.9, 1.1001, 0.01), max_shift)
-    r_v, _, tv = _search(_wall_profile(a, 1), _wall_profile(b, 1), [s], max_shift)
+    across, along = (cfg.roi[2], cfg.roi[3]) if cfg.air_end in ("top", "bottom") else (cfg.roi[3], cfg.roi[2])
+    if scales is None:
+        scales = np.arange(QC_SIZE_RANGE[0], QC_SIZE_RANGE[1] + 1e-9, 0.01)
+    shift = QC_SHIFT * across if shift is None else shift
+    shift_along = QC_SHIFT_ALONG * along if shift_along is None else shift_along
+    r_u, s, tu = _search(_wall_profile(a, 0), _wall_profile(b, 0), scales, shift)
+    r_v, _, tv = _search(_wall_profile(a, 1), _wall_profile(b, 1), [s], shift_along)
     half = h // 2
-    _, _, t_top = _match(_wall_profile(a[:half], 0), _wall_profile(b[:half], 0), [s],
-                         np.arange(tu - 15, tu + 15.01, 0.25))
-    _, _, t_bot = _match(_wall_profile(a[half:], 0), _wall_profile(b[half:], 0), [s],
-                         np.arange(tu - 15, tu + 15.01, 0.25))
-    # back from the working orientation (air end up) to camera pixels; see View.to_frame
-    dx, dy = {"top": (tu, tv), "bottom": (-tu, -tv), "left": (tv, -tu), "right": (-tv, tu)}[cfg.air_end]
-    return dx, dy, s, math.degrees(math.atan2(t_bot - t_top, half)), min(r_u, r_v)
+    win = 0.1 * half + 5                    # room for about 10 degrees of tilt
+    t_half = [_match(_wall_profile(p, 0), _wall_profile(q, 0), [s], np.arange(tu - win, tu + win + 0.01, 0.25))[2]
+              for p, q in ((a[:half], b[:half]), (a[half:], b[half:]))]
+    phi = math.atan2(t_half[1] - t_half[0], s * half)
+    return _box_affine(F, a.shape, s, phi, tu, tv), min(r_u, r_v)
+
+
+def warp_to_reference(frame, M):
+    """Resample a photo into the calibration's geometry (M: calibration -> photo pixels)."""
+    return cv2.warpAffine(frame, M[:2], (frame.shape[1], frame.shape[0]),
+                          flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP, borderMode=cv2.BORDER_REPLICATE)
 
 
 def align_to_reference(frame, cfg, ref=None):
     """
     Bring a photo into the calibration's geometry: rescale it to the calibration photo's
-    size (same camera at another resolution) and move the ROI to follow a small shift of
-    the syringe or camera. Returns (frame, cfg, checks); cfg is a moved copy.
+    size (same camera at another resolution), then measure how far the syringe moved,
+    grew or shrank (phone closer or farther) and tilted, and resample the photo to undo
+    it, so the calibration's barrel box and scale apply. Returns (frame, cfg, checks, M);
+    M (calibration -> original photo pixels, after any rescale) is None if not aligned.
     """
     checks = []
     H, W = frame.shape[:2]
@@ -613,7 +690,7 @@ def align_to_reference(frame, cfg, ref=None):
                                 f"photo shape differs from the calibration photo ({rw}x{rh})",
                                 "Use the camera, orientation and resolution you calibrated with, "
                                 "or run setup again."))
-            return frame, cfg, checks
+            return frame, cfg, checks, None
         else:
             smaller = W < rw
             frame = cv2.resize(frame, (rw, rh),
@@ -628,48 +705,56 @@ def align_to_reference(frame, cfg, ref=None):
         checks.append(Check("roi", FAIL, str(list(cfg.roi)),
                             "the calibrated barrel box does not fit inside this photo",
                             "Run setup with a photo from this camera."))
-        return frame, cfg, checks
+        return frame, cfg, checks, None
     if ref is None or ref.shape[:2] != frame.shape[:2]:
         checks.append(Check("alignment", SKIP, "-", "no matching calibration photo to compare with",
                             "Run setup again to store one."))
-        return frame, cfg, checks
+        return frame, cfg, checks, None
 
-    dx, dy, scale, tilt, score = register(to_gray(frame), to_gray(ref), cfg)
+    # Tilt first, from the wall direction: a tilt smears the wall profiles that the size
+    # and shift searches use. Then a wide search on the straightened photo, then a fine
+    # one; each pass works on the photo corrected by the passes before.
+    g, rg = to_gray(frame), to_gray(ref)
+    M = tilt_matrix(g, rg, cfg)
+    for wide in (True, False):
+        kw = {} if wide else dict(scales=np.arange(0.97, 1.0301, 0.01), shift=8, shift_along=8)
+        dM, score = register(warp_to_reference(g, M), rg, cfg, **kw)
+        M = M @ dM
+    lost = Check("alignment", FAIL, f"match {score:.2f}", "the syringe could not be found where expected",
+                 "Put the syringe and phone back on their usual spots, with the whole barrel in the "
+                 "photo and the white screen behind it. If the lens or zoom changed, run setup again.")
     if score < QC_ALIGN_RESPONSE:
-        checks.append(Check("alignment", FAIL, f"match {score:.2f}",
-                            "the barrel is not where the calibration photo has it",
-                            "Re-seat the syringe in the holder and check nothing blocks the view. "
-                            "If the camera, zoom or lens changed, run setup again."))
-        return frame, cfg, checks
-    st = worst([grade(abs(scale - 1), *QC_SCALE), grade(abs(tilt), *QC_ROTATION_DEG)])
-    checks.append(Check("scale", st, f"{(scale - 1) * 100:+.1f}% size, {tilt:+.1f} deg",
-                        "same distance and tilt as calibration" if st == OK else
-                        "the syringe looks a different size or tilted compared with calibration "
-                        "(bubble volume goes as size cubed)",
+        checks.append(lost)
+        return frame, cfg, checks, None
+    size = math.sqrt(abs(np.linalg.det(M[:2, :2])))
+    tilt = math.degrees(math.atan2(M[1, 0], M[0, 0]))
+    if not (QC_SIZE_RANGE[0] + 0.01 < size < QC_SIZE_RANGE[1] - 0.01):
+        checks.append(lost)                                     # at the edge of the search
+        return frame, cfg, checks, None
+    x, y, w, h = cfg.roi
+    corners = np.array([[x, y, 1], [x + w, y, 1], [x, y + h, 1], [x + w, y + h, 1]], np.float64)
+    mapped = corners @ M[:2].T
+    if (mapped.min(axis=0) < 0).any() or mapped[:, 0].max() > frame.shape[1] or mapped[:, 1].max() > frame.shape[0]:
+        checks.append(Check("alignment", FAIL, f"{size:.2f}x size", "part of the syringe is outside the photo",
+                            "Move the phone back or centre the syringe so the whole barrel is in the photo."))
+        return frame, cfg, checks, None
+    centre = np.array([x + w / 2.0, y + h / 2.0, 1.0])
+    d = (M @ centre - centre)[:2]
+    checks.append(Check("alignment", OK, f"{math.hypot(*d):.0f} px",
+                        "matches calibration" if math.hypot(*d) < 1 else
+                        f"syringe found {d[0]:+.0f}, {d[1]:+.0f} px from calibration; corrected"))
+    upx = cfg.ul_per_axial_px / min(size, 1.0)                  # farther away: less detail
+    st = worst([grade(size, *QC_FARTHER, higher_is_worse=False), grade(abs(tilt), *QC_ROTATION_DEG),
+                FAIL if upx > QC_UL_PER_PX[1] else OK])
+    msg = f"{(size - 1) * 100:+.0f}% size, {tilt:+.1f} deg"
+    checks.append(Check("scale", st, msg,
+                        "corrected for distance and tilt" if st == OK else
+                        "the syringe looks much smaller (phone farther away) or tilted compared with "
+                        "calibration; corrected, but with less detail" if abs(tilt) < QC_ROTATION_DEG[0] else
+                        "the syringe or phone is tilted compared with calibration",
                         "" if st == OK else
-                        "Keep the camera distance and zoom fixed (on a phone, stay on the 1x lens "
-                        "and turn off automatic macro), seat the syringe straight, or run setup again."))
-    width = min(cfg.roi[2], cfg.roi[3])          # barrel width in pixels
-    d = math.hypot(dx, dy)
-    val = f"{d:.1f} px"
-    status = grade(d / width, *QC_SHIFT)
-    if status == FAIL:
-        checks.append(Check("alignment", FAIL, val,
-                            f"syringe or camera moved {d:.0f} px since calibration",
-                            "Re-seat the syringe in the holder. If the camera moved, run setup again."))
-        return frame, cfg, checks
-    ix, iy = int(round(dx)), int(round(dy))
-    moved = replace(cfg, roi=[cfg.roi[0] + ix, cfg.roi[1] + iy, cfg.roi[2], cfg.roi[3]],
-                    exclusions=[[x + ix, y + iy, w, h] for x, y, w, h in cfg.exclusions])
-    if not roi_inside(moved.roi, frame.shape):
-        checks.append(Check("alignment", FAIL, val, "the syringe moved partly out of the photo",
-                            "Re-seat the syringe in the holder."))
-        return frame, cfg, checks
-    checks.append(Check("alignment", status, val,
-                        "matches calibration" if ix == iy == 0 else
-                        f"barrel box moved ({ix:+d}, {iy:+d}) px to follow the syringe",
-                        "Seat the syringe the same way each time." if status == WARN else ""))
-    return frame, moved, checks
+                        "Put the phone back about where it was at calibration and stand the syringe straight."))
+    return warp_to_reference(frame, M), cfg, checks, M
 
 
 def check_resolution(cfg):
@@ -821,10 +906,11 @@ def check_threshold_stability(frame, cfg, res):
 
 @dataclass
 class Assessment:
-    frame: np.ndarray       # the photo as measured (rescaled to the calibration size if needed)
-    cfg: Config             # the config used, with the ROI moved to follow any shift
+    frame: np.ndarray       # the photo as measured: rescaled and aligned to the calibration photo
+    cfg: Config             # the config used
     result: object          # Result, or None if the photo could not be measured at all
     checks: list
+    warp: object = None     # calibration -> photo matrix used for the alignment, or None
 
     @property
     def status(self):
@@ -846,13 +932,13 @@ def assess(frame, cfg, ref=None, use_exclusions=True):
     which the printed scale is not where it was at calibration (syringe turned)."""
     if not use_exclusions:
         cfg = replace(cfg, exclusions=[])
-    frame, cfg, checks = align_to_reference(frame, cfg, ref)
-    if any(c.name in ("geometry", "roi") and c.status == FAIL for c in checks):
-        return Assessment(frame, cfg, None, checks)
+    frame, cfg, checks, M = align_to_reference(frame, cfg, ref)
+    if any(c.name in ("geometry", "roi", "alignment") and c.status == FAIL for c in checks):
+        return Assessment(frame, cfg, None, checks)     # not where the barrel box can be used
     res = measure(frame, cfg)
     checks += check_photo(frame, cfg, res) + check_result(res, cfg)
     checks.append(check_threshold_stability(frame, cfg, res))
-    return Assessment(frame, cfg, res, checks)
+    return Assessment(frame, cfg, res, checks, M)
 
 
 def load_reference(cfg, config_path):
@@ -1076,12 +1162,28 @@ def grab_still(args):
     return frame
 
 
+def fit_screen(img, max_w=1600, max_h=900):
+    """A copy small enough to show on screen, and its scale (phone photos are ~4000 px)."""
+    s = min(1.0, max_w / img.shape[1], max_h / img.shape[0])
+    return (img.copy() if s == 1 else cv2.resize(img, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)), s
+
+
+def select_boxes(frame, title, many=False):
+    """cv2.selectROI(s) on a screen-sized copy; boxes returned in full-photo pixels."""
+    disp, s = fit_screen(frame)
+    rs = cv2.selectROIs(title, disp, showCrosshair=False) if many else [cv2.selectROI(title, disp, showCrosshair=False)]
+    cv2.destroyAllWindows()
+    return [[int(round(v / s)) for v in r] for r in rs]
+
+
 def click_points(frame, n, title):
-    pts, disp = [], frame.copy()
+    """n mouse clicks on a screen-sized copy; points returned in full-photo pixels."""
+    disp, s = fit_screen(frame)
+    pts = []
 
     def on_mouse(event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN and len(pts) < n:
-            pts.append((x, y))
+            pts.append((x / s, y / s))
             cv2.circle(disp, (x, y), 4, (0, 0, 255), -1)
 
     cv2.namedWindow(title)
@@ -1131,19 +1233,14 @@ def cmd_setup(args):
     if args.roi is not None:
         roi = list(args.roi)
     else:
-        r = cv2.selectROI("1/2  Drag a box just INSIDE the barrel walls, then ENTER", frame,
-                          showCrosshair=False)
-        cv2.destroyAllWindows()
-        if r[2] == 0 or r[3] == 0:
+        roi = select_boxes(frame, "1/2  Drag a box just INSIDE the barrel walls, from below the tip "
+                                  "to above the plunger, then ENTER")[0]
+        if roi[2] == 0 or roi[3] == 0:
             sys.exit("No ROI selected")
-        roi = [int(v) for v in r]
 
     exclusions = []
     if args.exclusions:
-        rs = cv2.selectROIs("Box the printed numbers (ENTER each), ESC when done",
-                            frame, showCrosshair=False)
-        cv2.destroyAllWindows()
-        exclusions = [[int(v) for v in r] for r in rs]
+        exclusions = select_boxes(frame, "Box the printed numbers (ENTER each), ESC when done", many=True)
 
     barrel_id = args.barrel_id_mm
     while barrel_id is None:
@@ -1156,7 +1253,7 @@ def cmd_setup(args):
 
     mm_per_px = args.mm_per_px
     if mm_per_px is None:
-        pts = click_points(frame, 2, "2/2  Click two graduation marks far apart (along the barrel)")
+        pts = click_points(frame, 2, "2/2  Click two graduation lines far apart, e.g. the 1 mL and 10 mL lines")
         if len(pts) < 2:
             sys.exit("Calibration cancelled")
         dist_px = math.dist(pts[0], pts[1])
@@ -1253,14 +1350,16 @@ def cmd_run(args):
                     break
                 if n_frames % 15 == 0:            # the full photo checks are slower; refresh ~2x/s
                     a = assess(frame, cfg, ref)
-                    # Measure every frame in the geometry the checks found (rescaled, ROI moved).
-                    live_checks, live_cfg, live_size = a.checks, a.cfg, a.frame.shape[1::-1]
+                    # Measure every frame in the geometry the checks found (rescaled, aligned).
+                    live_checks, live_cfg, live_size, live_M = a.checks, a.cfg, a.frame.shape[1::-1], a.warp
                     measurable = a.result is not None
                 n_frames += 1
                 res = None
                 if measurable:
                     if frame.shape[1::-1] != live_size:
                         frame = cv2.resize(frame, live_size, interpolation=cv2.INTER_AREA)
+                    if live_M is not None:
+                        frame = warp_to_reference(frame, live_M)
                     res = measure(frame, live_cfg)
                     history.append((res.max_pocket_ul, res.total_ul))
                 else:
@@ -1358,6 +1457,9 @@ def main():
     r.add_argument("--lateral-mag", type=float)
     r.add_argument("--min-diam-mm", type=float)
     r.add_argument("--polarity", choices=["dark", "bright", "both"])
+
+    for p in (s, r):    # --config also after the command (SUPPRESS keeps the top-level value)
+        p.add_argument("--config", default=argparse.SUPPRESS, help="calibration file (default bubble_config.json)")
 
     args = ap.parse_args()
     return cmd_setup(args) if args.cmd == "setup" else cmd_run(args)
