@@ -7,7 +7,7 @@ Mass testing: check a whole folder of syringe photos with one command.
     python batch_inspect.py photos/
 
 How to take the photos (phone, after calibrating once with syringe_bubble_inspector.py setup):
-  for each syringe: put it on its spot, let it rest, photo, turn it 90 degrees about
+  for each syringe: put it on its spot, let it rest, photo, turn it halfway round about
   its own axis, photo. Then copy all the photos into one folder and run this.
 
 Which photos belong to which syringe:
@@ -282,7 +282,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="Check a folder of syringe photos (mass testing).")
     ap.add_argument("folder", help="folder with the photos (or one subfolder per syringe)")
     ap.add_argument("--views", type=int, default=2, choices=[1, 2, 3, 4],
-                    help="photos per syringe: front, then turned 90, 180, 270 degrees (default 2)")
+                    help="photos per syringe: front, back (180), then 90 and 270 degrees (default 2)")
     ap.add_argument("--gap", type=float, default=20,
                     help="photos taken more than this many seconds apart are different syringes "
                          "(default 20)")

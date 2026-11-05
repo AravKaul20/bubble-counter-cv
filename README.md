@@ -48,8 +48,8 @@ python guided_inspection.py photo.jpg
 It prints PASS / MARGINAL / FAIL with the air volume and writes a report (path
 printed). If the photo is bad, for example lit from the front, blurry, or the syringe
 is far from where it was at calibration, it says INVALID and tells you what to fix. Optional: add a second photo with the
-syringe turned 90° (`python guided_inspection.py front.jpg turned.jpg`) to catch
-bubbles hidden behind the printed scale.
+syringe turned halfway round (`python guided_inspection.py front.jpg back.jpg`) to see
+through the clear window and behind the printed scale.
 
 **Easiest: test from the phone.** On the computer run
 
@@ -74,7 +74,8 @@ shows the command). Notes:
 check them all with one command:
 
 1. For each syringe: put it on its tape mark, let it rest about 30 s, take a photo,
-   turn it 90° about its own axis, and take a second photo.
+   turn it halfway round (180°) about its own axis so the clear window faces the
+   phone, and take a second photo.
 2. Copy all the photos into one folder, straight off the phone (JPEG, not HEIC).
 3. Run:
    ```bash
@@ -201,7 +202,7 @@ sample) and `--lateral-mag` (about 1.33 for saline, 1.4–1.5 for contrast media
 
 ```bash
 python guided_inspection.py photo.jpg                 # one photo
-python guided_inspection.py front.jpg turned.jpg      # optional second view, turned 90°
+python guided_inspection.py front.jpg back.jpg        # optional second view, turned 180°
 python guided_inspection.py                           # asks for the photo (drag it in)
 ```
 
@@ -221,7 +222,7 @@ Photo sources:
 |---|---|
 | `guided_inspection.py` | Asks for each photo file (type the path or drag the file into the terminal). Use this with a phone. |
 | `guided_inspection.py --camera 0` | Live webcam preview with the step instructions and running checks. SPACE captures. |
-| `guided_inspection.py front.jpg quarter.jpg` | Photos given up front, no questions. |
+| `guided_inspection.py front.jpg back.jpg` | Photos given up front, no questions. |
 
 Phone photos: use JPEG, not HEIC (on iPhone: Settings → Camera → Formats → Most
 Compatible), and the same phone, lens, zoom and orientation as the calibration photo.

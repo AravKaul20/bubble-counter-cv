@@ -7,7 +7,7 @@ Test syringes from your phone: no cables, no copying files, no terminal while te
     python phone_server.py
 
 It prints a web address. Open it in the phone's browser (phone and computer on the same
-Wi-Fi). The page walks you through each syringe: take the front photo, turn it 90 degrees,
+Wi-Fi). The page walks you through each syringe: take the front photo, turn it halfway round,
 take the second photo, and the result (PASS / MARGINAL / FAIL / RETAKE) shows on the
 phone a few seconds later, with the annotated photo. Then the next syringe.
 

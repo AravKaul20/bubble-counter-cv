@@ -8,7 +8,7 @@ position, size, resolution), asks for a retake when a photo is unusable, combine
 views and writes a report.
 
     python guided_inspection.py photo.jpg                # check one photo, done
-    python guided_inspection.py front.jpg quarter.jpg    # two views of the same syringe
+    python guided_inspection.py front.jpg back.jpg       # two views of the same syringe
     python guided_inspection.py                          # asks for the photo (drag it in)
     python guided_inspection.py --camera 0               # captures from a webcam
 
@@ -48,13 +48,14 @@ from syringe_bubble_inspector import (FAIL, OK, SKIP, SPEC_MAX_POCKET_UL, STATUS
 
 # The syringe is turned about its own axis between views. Every view sees the whole
 # barrel from another side, so a bubble hidden behind the printed scale or another
-# bubble in one view is visible in another.
+# bubble in one view is visible in another. Two views = front and back: on labelled
+# syringes the back shows the clear window, with the label behind the liquid.
 VIEWS = [
     ("front", "Front", "graduations facing the camera"),
-    ("quarter", "Quarter turn", "turn the syringe 90 degrees about its own axis, "
-                                "keeping it on its spot"),
-    ("half", "Half turn", "turn it another 90 degrees (graduations facing away)"),
-    ("three-quarter", "Three-quarter turn", "turn it another 90 degrees"),
+    ("half", "Back", "turn the syringe halfway round (180 degrees) about its own axis, "
+                     "keeping it on its spot, so the clear window faces the camera"),
+    ("quarter", "Quarter turn", "turn it 90 degrees back, so the graduations face sideways"),
+    ("three-quarter", "Three-quarter turn", "turn it halfway round (180 degrees)"),
 ]
 
 CHECKLIST = [
@@ -650,7 +651,7 @@ def parse_args(argv):
     ap = argparse.ArgumentParser(description="Guided still-photo inspection of a filled syringe "
                                              "against the 25 uL / 250 uL-per-10 mL spec.")
     ap.add_argument("photo", nargs="*", help="photo(s) of the syringe: front, then optionally "
-                                             "turned 90/180/270 degrees. None: you are asked.")
+                                             "the back (180), then 90 and 270 degrees. None: you are asked.")
     ap.add_argument("--config", default="bubble_config.json", help="calibration written by setup")
     ap.add_argument("--sample", help="sample / run ID for the report (default: date and time)")
     ap.add_argument("--operator", default="", help="name or initials for the report")
@@ -658,7 +659,7 @@ def parse_args(argv):
     ap.add_argument("--camera", type=int, help="capture from this camera instead of photo files")
     ap.add_argument("--photos", nargs="+", help=argparse.SUPPRESS)      # older spelling
     ap.add_argument("--views", type=int, choices=range(1, len(VIEWS) + 1),
-                    help="number of views when asking for photos (default 1; 2 adds a quarter turn)")
+                    help="number of views when asking for photos (default 1; 2 adds the back, turned 180 degrees)")
     ap.add_argument("--out", default="sessions", help="folder for session reports")
     ap.add_argument("--fill-ml", type=float, help="liquid volume in this syringe (default: from config)")
     ap.add_argument("--settle", type=int, default=30, help="seconds the syringe rests before the photos")
@@ -672,7 +673,7 @@ def parse_args(argv):
         ap.error("give photos or --camera, not both")
     if args.photos:
         if len(args.photos) > len(VIEWS):
-            ap.error(f"at most {len(VIEWS)} photos (front, then turned 90, 180, 270 degrees)")
+            ap.error(f"at most {len(VIEWS)} photos (front, back, then 90 and 270 degrees)")
         if args.views and args.views != len(args.photos):
             ap.error(f"--views {args.views} but {len(args.photos)} photo(s) given")
         args.views = len(args.photos)
